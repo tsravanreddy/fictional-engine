@@ -5,37 +5,57 @@ on:
 permissions:
   contents: write
   issues: write
+  pull-requests: write # Required permission to create a Pull Request
 jobs:
   update-config:
     if: github.event.issue.title == 'Configure config.json'
-    runs-on: windows-latest
+    runs-on: windows-latest 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          # Fetch full history for proper branch/commit operations
+          fetch-depth: 0
 
-      - name: Extract values from issue body
+      - name: Extract values and define branch name from issue body
         id: extract
         shell: pwsh
         run: |
           $body = "${{ github.event.issue.body }}"
-          $driver_name = ($body -split "### Driver Name")[1] -split "###" | Select-Object -First 1
-          $driver_name = $driver_name.Trim()
-          $version = ($body -split "### Version")[1] -split "###" | Select-Object -First 1
-          $version = $version.Trim()
-          $instrument_model = ($body -split "### Instrument Model")[1] -split "###" | Select-Object -First 1
-          $instrument_model = $instrument_model.Trim()
-          $manufacturer = ($body -split "### Manufacturer")[1] -split "###" | Select-Object -First 1
-          $manufacturer = $manufacturer.Trim()
+          
+          # Define a script block for extraction using PowerShell string manipulation
+          $extract_value = {
+              param([string]$Header)
+              # Use -split for extraction between two headers
+              $value = ($body -split "### $Header")[1] -split "###" | Select-Object -First 1
+              return $value.Trim()
+          }
+          
+          $DRIVER_NAME = $extract_value.Invoke("Driver Name")
+          $VERSION = $extract_value.Invoke("Version")
+          $INSTRUMENT_MODEL = $extract_value.Invoke("Instrument Model")
+          $MANUFACTURER = $extract_value.Invoke("Manufacturer")
           
           # Clean driver name for folder usage (remove invalid characters)
-          $clean_driver_name = $driver_name -replace '[<>:"/\\|?*\s]', '_'
+          $CLEAN_DRIVER_NAME = $DRIVER_NAME -replace '[<>:"/\\|?*\s]', '_'
           
-          "driver_name=$driver_name" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
-          "clean_driver_name=$clean_driver_name" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
-          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
-          "instrument_model=$instrument_model" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
-          "manufacturer=$manufacturer" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          # Define the new branch name
+          $ISSUE_NUMBER = "${{ github.event.issue.number }}"
+          $BRANCH_NAME = "feat/$CLEAN_DRIVER_NAME-$ISSUE_NUMBER"
+          
+          "driver_name=$DRIVER_NAME" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "clean_driver_name=$CLEAN_DRIVER_NAME" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "version=$VERSION" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "instrument_model=$INSTRUMENT_MODEL" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "manufacturer=$MANUFACTURER" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "branch_name=$BRANCH_NAME" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
 
+      - name: Create and switch to new branch
+        shell: pwsh
+        run: |
+          git checkout -b ${{ steps.extract.outputs.branch_name }}
+          Write-Host "Successfully created and switched to branch: ${{ steps.extract.outputs.branch_name }}"
+          
       - name: Debug extracted values
         shell: pwsh
         run: |
@@ -44,223 +64,156 @@ jobs:
           Write-Host "Version: ${{ steps.extract.outputs.version }}"
           Write-Host "Instrument Model: ${{ steps.extract.outputs.instrument_model }}"
           Write-Host "Manufacturer: ${{ steps.extract.outputs.manufacturer }}"
+          Write-Host "Branch Name: ${{ steps.extract.outputs.branch_name }}"
           
       - name: List current directory structure
         shell: pwsh
         run: |
           Write-Host "Current directory contents:"
-          Get-ChildItem -Path . -Force | ForEach-Object { Write-Host $_.Name }
+          Get-ChildItem -Path . -Recurse -Depth 2
           
       - name: Rename ConsoleApp1 folder
         shell: pwsh
         run: |
-          $oldFolder = "ConsoleApp1"
-          $newFolder = "${{ steps.extract.outputs.clean_driver_name }}"
+          $OLD_FOLDER="ConsoleApp1"
+          $NEW_FOLDER="${{ steps.extract.outputs.clean_driver_name }}"
           
-          Write-Host "Renaming folder '$oldFolder' to '$newFolder'"
+          Write-Host "Attempting to rename folder '$OLD_FOLDER' to '$NEW_FOLDER'"
           
-          if (Test-Path $oldFolder) {
-            try {
-              # First, rename the folder using PowerShell
-              Rename-Item -Path $oldFolder -NewName $newFolder -Force
-              Write-Host " Successfully renamed $oldFolder to $newFolder using PowerShell"
-              
-              # Verify the rename worked
-              if (Test-Path $newFolder) {
-                Write-Host " Confirmed: $newFolder exists after rename"
-                
-                # Now tell Git about the rename by removing old and adding new
-                if (Test-Path $oldFolder) {
-                  # If old folder still exists, Git might not have tracked the rename properly
-                  Write-Host "Old folder still exists, using git operations..."
-                  git rm -r $oldFolder --cached 2>$null
-                }
-                
-                git add $newFolder
-                Write-Host " Git operations completed"
-                
-                Write-Host "Contents of renamed folder:"
-                Get-ChildItem -Path $newFolder | ForEach-Object { Write-Host "  - $($_.Name)" }
-              } else {
-                Write-Host " ERROR: $newFolder was not created"
-                exit 1
-              }
-            }
-            catch {
-              Write-Host " ERROR renaming folder: $($_.Exception.Message)"
-              Write-Host "Trying git mv as fallback..."
-              
-              # Fallback to git mv
-              try {
-                git mv $oldFolder $newFolder
-                Write-Host "Fallback git mv successful"
-              }
-              catch {
-                Write-Host " Both rename methods failed: $($_.Exception.Message)"
-                exit 1
-              }
-            }
+          if (Test-Path -Path $OLD_FOLDER -PathType Container) {
+            # Use git mv for proper tracking of the rename on Windows runner
+            git mv "$OLD_FOLDER" "$NEW_FOLDER"
+            Write-Host "Successfully renamed $OLD_FOLDER to $NEW_FOLDER using git mv"
           } else {
-            Write-Host " WARNING: $oldFolder does not exist"
-            Write-Host "Available folders:"
-            Get-ChildItem -Path . -Directory | ForEach-Object { Write-Host "  - $($_.Name)" }
-            exit 1
+            Write-Warning "::warning title=Folder Not Found::$OLD_FOLDER does not exist."
           }
 
       - name: Rename solution and project files
         shell: pwsh
         run: |
-          $oldName = "ConsoleApp1"
-          $newName = "${{ steps.extract.outputs.clean_driver_name }}"
+          $OLD_NAME="ConsoleApp1"
+          $NEW_NAME="${{ steps.extract.outputs.clean_driver_name }}"
           
           Write-Host "Renaming .sln and .csproj files..."
           
-          # Rename .sln files
-          Get-ChildItem -Path . -Filter "*.sln" -Recurse | Where-Object { $_.BaseName -eq $oldName } | ForEach-Object {
-            $oldPath = $_.FullName
-            $newPath = $_.FullName -replace [regex]::Escape("$oldName.sln"), "$newName.sln"
-            Write-Host "Renaming solution file: $($_.Name) -> $newName.sln"
-            
-            try {
-              Rename-Item -Path $oldPath -NewName "$newName.sln" -Force
-              Write-Host " Successfully renamed $($_.Name) to $newName.sln"
-            }
-            catch {
-              Write-Host " Failed to rename $($_.Name): $($_.Exception.Message)"
-            }
+          # Rename the solution file (e.g., ConsoleApp1.sln -> NewDriverName.sln)
+          Get-ChildItem -Path . -Filter "$OLD_NAME.sln" -ErrorAction SilentlyContinue | ForEach-Object {
+            Write-Host "Renaming solution file: $($_.Name)"
+            # Use git mv to rename the file and stage the change
+            git mv -f "$($_.FullName)" "$($_.DirectoryName)/$NEW_NAME.sln"
           }
           
-          # Rename .csproj files in the renamed folder
-          $projectFolder = "${{ steps.extract.outputs.clean_driver_name }}"
-          if (Test-Path $projectFolder) {
-            Get-ChildItem -Path $projectFolder -Filter "*.csproj" | Where-Object { $_.BaseName -eq $oldName } | ForEach-Object {
-              $oldPath = $_.FullName
-              $newPath = Join-Path $projectFolder "$newName.csproj"
-              Write-Host "Renaming project file: $($_.Name) -> $newName.csproj"
-              
-              try {
-                Rename-Item -Path $oldPath -NewName "$newName.csproj" -Force
-                Write-Host " Successfully renamed $($_.Name) to $newName.csproj"
-              }
-              catch {
-                Write-Host " Failed to rename $($_.Name): $($_.Exception.Message)"
-              }
-            }
+          # Rename the project file (e.g., NewDriverName/ConsoleApp1.csproj -> NewDriverName/NewDriverName.csproj)
+          Get-ChildItem -Path . -Filter "$OLD_NAME.csproj" -Recurse -ErrorAction SilentlyContinue | ForEach-Object {
+            Write-Host "Renaming project file: $($_.Name)"
+            # Use git mv to rename the file and stage the change
+            git mv -f "$($_.FullName)" "$($_.DirectoryName)/$NEW_NAME.csproj"
           }
-          
-          # Also check for any other .csproj files that might need renaming in root or other locations
-          Get-ChildItem -Path . -Filter "*.csproj" -Recurse | Where-Object { $_.BaseName -eq $oldName } | ForEach-Object {
-            $oldPath = $_.FullName
-            $newPath = $_.FullName -replace [regex]::Escape("$oldName.csproj"), "$newName.csproj"
-            Write-Host "Renaming project file: $($_.Name) -> $newName.csproj (from $($_.Directory))"
-            
-            try {
-              Rename-Item -Path $oldPath -NewName "$newName.csproj" -Force
-              Write-Host " Successfully renamed $($_.Name) to $newName.csproj"
-            }
-            catch {
-              Write-Host " Failed to rename $($_.Name): $($_.Exception.Message)"
-            }
-          }
-          
-      - name: Update solution files
+
+      - name: Update solution and project content
         shell: pwsh
         run: |
-          $oldFolder = "ConsoleApp1"
-          $newFolder = "${{ steps.extract.outputs.clean_driver_name }}"
+          $OLD_REF="ConsoleApp1"
+          $NEW_REF="${{ steps.extract.outputs.clean_driver_name }}"
           
-          Write-Host "Updating references in .sln files..."
-          Get-ChildItem -Path . -Filter *.sln -Recurse | ForEach-Object {
-            Write-Host "Processing solution file: $($_.Name)"
-            $content = Get-Content $_.FullName -Raw
-            $updatedContent = $content -replace [regex]::Escape($oldFolder), $newFolder
-            
-            if ($content -ne $updatedContent) {
-              Set-Content -Path $_.FullName -Value $updatedContent -NoNewline
-              Write-Host " Updated $($_.Name)"
-            } else {
-              Write-Host " No changes needed in $($_.Name)"
-            }
-          }
+          Write-Host "Updating references in .sln and .csproj files..."
           
-          # Also update .csproj files
-          Write-Host "Updating references in .csproj files..."
-          Get-ChildItem -Path . -Filter *.csproj -Recurse | ForEach-Object {
-            Write-Host "Processing project file: $($_.Name)"
-            $content = Get-Content $_.FullName -Raw
-            $updatedContent = $content -replace [regex]::Escape($oldFolder), $newFolder
+          # Find all .sln and .csproj files recursively
+          Get-ChildItem -Path . -Recurse -Include *.sln, *.csproj -ErrorAction SilentlyContinue | ForEach-Object {
+            $file = $_.FullName
+            Write-Host "Processing file: $($_.Name)"
             
-            if ($content -ne $updatedContent) {
-              Set-Content -Path $_.FullName -Value $updatedContent -NoNewline
-              Write-Host " Updated $($_.Name)"
-            } else {
-              Write-Host " No changes needed in $($_.Name)"
-            }
+            # Read content, replace using PowerShell's -replace operator, and write back
+            # -NoNewline is important for maintaining file integrity
+            (Get-Content -Path $file -Raw) -replace [regex]::Escape($OLD_REF), $NEW_REF | Set-Content -Path $file -NoNewline
           }
 
       - name: Update config.json
         shell: pwsh
         run: |
-          $configPath = "config.json"
-          if (Test-Path $configPath) {
-            $config = Get-Content $configPath | ConvertFrom-Json
+          $CONFIG_PATH="config.json"
+          if (Test-Path $CONFIG_PATH) {
+            # Read, convert, update properties, convert back, and write
+            $config = Get-Content $CONFIG_PATH | ConvertFrom-Json
+            
             $config.driver_name = "${{ steps.extract.outputs.driver_name }}"
             $config.version = "${{ steps.extract.outputs.version }}"
             $config.instrument_model = "${{ steps.extract.outputs.instrument_model }}"
             $config.manufacturer = "${{ steps.extract.outputs.manufacturer }}"
-            $config | ConvertTo-Json -Depth 10 | Set-Content $configPath
-            Write-Host " Updated config.json"
+            
+            $config | ConvertTo-Json -Depth 10 | Set-Content $CONFIG_PATH -NoNewline
+            Write-Host "Updated config.json"
           } else {
-            Write-Host " config.json not found"
+            Write-Warning "::warning title=File Not Found::config.json not found"
           }
-
-
-      - name: Show git status
-        shell: pwsh
-        run: |
-          Write-Host "Git status:"
-          git status
-          Write-Host ""
-          Write-Host "Git diff --cached:"
-          git diff --cached --name-only
-
-      - name: Manual git commit and push
+          
+      - name: Commit changes
         shell: pwsh
         run: |
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
           
-          # Add any remaining changes
+          # Add all modified, renamed, and new files
           git add .
           
           # Check if there are changes to commit
-          $changes = git diff --cached --name-only
-          if ($changes) {
-            Write-Host "Changes to commit:"
-            $changes | ForEach-Object { Write-Host "  - $_" }
-            
-            git commit -m " updated"
-            
-            git push
-            Write-Host "Changes committed and pushed"
+          # git diff --cached --quiet exits with 0 if no changes, 1 if there are changes
+          $changes = git diff --cached --quiet
+          if (-not $changes) {
+            $COMMIT_MESSAGE = "feat(${{ steps.extract.outputs.clean_driver_name }}): Configure driver files from Issue #${{ github.event.issue.number }}"
+            git commit -m "$COMMIT_MESSAGE"
+            Write-Host "Changes committed to branch ${{ steps.extract.outputs.branch_name }}"
           } else {
-            Write-Host "No changes to commit"
+            Write-Host "No changes to commit."
           }
 
-      - name: Add comment and close issue
+      - name: Create Pull Request
+        id: create_pr
+        uses: peter-evans/create-pull-request@v6
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          # The commit is already made in the previous step, so we ensure the action
+          # pushes the existing commit and creates the PR.
+          commit-message: no-commit
+          branch: ${{ steps.extract.outputs.branch_name }}
+          base: main # IMPORTANT: Set your target branch (e.g., 'main' or 'master')
+          title: 'feat: Configure ${{ steps.extract.outputs.driver_name }} driver from Issue #${{ github.event.issue.number }}'
+          body: |
+            🤖 This PR was automatically generated from issue #${{ github.event.issue.number }} (Configure config.json).
+            
+            The following updates were applied:
+            
+            - **Driver Name:** `${{ steps.extract.outputs.driver_name }}`
+            - **Version:** `${{ steps.extract.outputs.version }}`
+            - **Instrument Model:** `${{ steps.extract.outputs.instrument_model }}`
+            - **Manufacturer:** `${{ steps.extract.outputs.manufacturer }}`
+            
+            This PR renames the project folder, solution, and project files from `ConsoleApp1` and updates the `config.json`.
+            
+            Closes #${{ github.event.issue.number }}
+            
+            ---
+            *If you wish to make changes, please push to the branch `${{ steps.extract.outputs.branch_name }}`.*
+
+      - name: Add comment to issue
         uses: actions/github-script@v7
         with:
           script: |
+            const prUrl = steps.create_pr.outputs.pull-request-url;
             const issue_number = context.payload.issue.number;
-            await github.rest.issues.createComment({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: issue_number,
-              body: `updated`
-            });
-            await github.rest.issues.update({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: issue_number,
-              state: 'closed'
-            });
+            
+            if (prUrl) {
+                await github.rest.issues.createComment({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    issue_number: issue_number,
+                    body: `✅ Configuration complete. I have created a Pull Request for your review: ${prUrl}.`
+                });
+            } else {
+                await github.rest.issues.createComment({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    issue_number: issue_number,
+                    body: `⚠️ Configuration completed, but I was unable to create a Pull Request (likely because no files were modified). Please review the commit on branch ${{ steps.extract.outputs.branch_name }}.`
+                });
+            }
